@@ -1,60 +1,49 @@
 /**
  * Netlify serverless function — fetches chord sheets from Ultimate Guitar
- * server-side so there are no CORS issues on any device (including iPhone).
+ * using their mobile JSON API (api.ultimate-guitar.com) which is not behind
+ * the Cloudflare bot-protection that blocks requests to the main website.
  *
  * Usage: GET /.netlify/functions/fetch-chords?artist=X&title=Y
  */
 
 const https = require('https')
-const http  = require('http')
 const zlib  = require('zlib')
 
-// Decompress a Buffer based on Content-Encoding header
 function decompress(buffer, encoding) {
   return new Promise((resolve, reject) => {
-    if (encoding === 'gzip') {
-      zlib.gunzip(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
-    } else if (encoding === 'deflate') {
-      zlib.inflate(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
-    } else if (encoding === 'br') {
-      zlib.brotliDecompress(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
-    } else {
-      resolve(buffer.toString('utf8'))
-    }
+    if (encoding === 'gzip')    zlib.gunzip(buffer,          (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    else if (encoding === 'deflate') zlib.inflate(buffer,    (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    else if (encoding === 'br') zlib.brotliDecompress(buffer,(e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    else resolve(buffer.toString('utf8'))
   })
 }
 
-// Follow redirects, decompress, return body as string
-function fetchUrl(url, redirects = 0) {
+function fetchJSON(url, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 6) return reject(new Error('Too many redirects'))
-    const lib = url.startsWith('https') ? https : http
-    const req = lib.get(url, {
+    const req = https.get(url, {
       headers: {
-        'User-Agent':                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language':           'en-US,en;q=0.9',
-        'Accept-Encoding':           'gzip, deflate, br',
-        'Connection':                'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest':            'document',
-        'Sec-Fetch-Mode':            'navigate',
-        'Sec-Fetch-Site':            'none',
-        'Sec-Fetch-User':            '?1',
-        'Cache-Control':             'max-age=0',
-        'sec-ch-ua':                 '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        'sec-ch-ua-mobile':          '?0',
-        'sec-ch-ua-platform':        '"Windows"',
+        // Mimic the official UG Android app
+        'User-Agent':      'UGT_ANDROID/6.13.0 (Linux; Android 13; Pixel 7)',
+        'Accept':          'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection':      'keep-alive',
       },
     }, res => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchUrl(res.headers.location, redirects + 1).then(resolve).catch(reject)
+        return fetchJSON(res.headers.location, redirects + 1).then(resolve).catch(reject)
       }
       const encoding = res.headers['content-encoding'] || ''
       const chunks = []
       res.on('data', c => chunks.push(c))
       res.on('end', () => {
-        decompress(Buffer.concat(chunks), encoding).then(resolve).catch(reject)
+        decompress(Buffer.concat(chunks), encoding)
+          .then(text => {
+            try { resolve(JSON.parse(text)) }
+            catch { reject(new Error('Response was not valid JSON')) }
+          })
+          .catch(reject)
       })
     })
     req.on('error', reject)
@@ -64,18 +53,9 @@ function fetchUrl(url, redirects = 0) {
 
 function decodeHtmlEntities(str) {
   return str
-    .replace(/&amp;/g,  '&')
-    .replace(/&lt;/g,   '<')
-    .replace(/&gt;/g,   '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&#x27;/g, "'")
-}
-
-function extractJsStore(html) {
-  const m = html.match(/class="js-store"\s+data-content="([^"]+)"/)
-  if (!m) return null
-  try { return JSON.parse(decodeHtmlEntities(m[1])) } catch { return null }
+    .replace(/&amp;/g,  '&').replace(/&lt;/g,  '<')
+    .replace(/&gt;/g,   '>').replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'").replace(/&#x27;/g, "'")
 }
 
 exports.handler = async event => {
@@ -89,36 +69,46 @@ exports.handler = async event => {
 
   const { artist = '', title = '' } = event.queryStringParameters || {}
   if (!artist.trim() || !title.trim()) {
-    return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'Missing artist or title' }) }
+    return { statusCode: 400, headers: cors,
+      body: JSON.stringify({ error: 'Missing artist or title' }) }
   }
 
   try {
-    // ── Step 1: search Ultimate Guitar ──────────────────────────────────────
-    const query      = encodeURIComponent(`${title} ${artist}`)
-    const searchUrl  = `https://www.ultimate-guitar.com/search.php?search_type=title&value=${query}`
-    const searchHtml = await fetchUrl(searchUrl)
-    const searchJson = extractJsStore(searchHtml)
+    // ── Step 1: search via the UG mobile API (no Cloudflare) ────────────────
+    const q = encodeURIComponent(`${title} ${artist}`)
+    const searchData = await fetchJSON(
+      `https://api.ultimate-guitar.com/api/v1/tab/search?q=${q}&type[]=300&official=0&page=1`
+    )
 
-    if (!searchJson) {
-      // Return a snippet of the page to help diagnose bot-block vs parse error
-      const preview = searchHtml.slice(0, 300).replace(/\n/g, ' ')
-      throw new Error(`Could not read search results. Page preview: ${preview}`)
-    }
+    const tabs = searchData?.data?.tabs ?? []
+    // Prefer "Chords" type; fall back to anything
+    const hit = tabs.find(t => t.type_name === 'Chords') ??
+                tabs.find(t => ['Tab', 'Pro Tab'].includes(t.type_name)) ??
+                tabs[0]
 
-    const results = searchJson?.store?.page?.data?.results ?? []
-    const hit = results.find(r => r.type === 'Chords') ??
-                results.find(r => ['Tab', 'Pro Tab'].includes(r.type))
-    if (!hit?.tab_url) throw new Error('No chord sheet found for this song on Ultimate Guitar')
+    if (!hit?.id) throw new Error('No chord sheet found for this song on Ultimate Guitar')
 
-    // ── Step 2: fetch the tab page ──────────────────────────────────────────
-    const tabHtml = await fetchUrl(hit.tab_url)
-    const tabJson = extractJsStore(tabHtml)
-    if (!tabJson) throw new Error('Could not read the chord sheet page')
+    // ── Step 2: fetch the full tab content via the API ───────────────────────
+    const tabData = await fetchJSON(
+      `https://api.ultimate-guitar.com/api/v1/tab/info?tab_id=${hit.id}&tonality_name=&version=0`
+    )
 
-    const content = tabJson?.store?.page?.data?.tab_view?.wiki_tab?.content
-    if (!content) throw new Error('Chord content was empty')
+    const content =
+      tabData?.data?.tab_view?.wiki_tab?.content ??
+      tabData?.data?.tab?.content ?? ''
 
-    return { statusCode: 200, headers: cors, body: JSON.stringify({ content }) }
+    if (!content.trim()) throw new Error('Chord content was empty')
+
+    // Convert UG [ch]X[/ch] / [tab] tags → our [X] inline format
+    const converted = content
+      .replace(/\[tab\]/gi, '')
+      .replace(/\[\/tab\]/gi, '')
+      .replace(/\[ch\]([^\[]+?)\[\/ch\]/g, '[$1]')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .trim()
+
+    return { statusCode: 200, headers: cors, body: JSON.stringify({ content: converted }) }
 
   } catch (err) {
     return {
