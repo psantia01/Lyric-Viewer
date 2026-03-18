@@ -24,11 +24,13 @@ function fetchJSON(url, redirects = 0) {
     const req = https.get(url, {
       headers: {
         // Mimic the official UG Android app
-        'User-Agent':      'UGT_ANDROID/6.13.0 (Linux; Android 13; Pixel 7)',
-        'Accept':          'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection':      'keep-alive',
+        'User-Agent':        'UGT_ANDROID/6.13.0 (Linux; Android 13; Pixel 7)',
+        'Accept':            'application/json, text/plain, */*',
+        'Accept-Language':   'en-US,en;q=0.9',
+        'Accept-Encoding':   'gzip, deflate, br',
+        'Connection':        'keep-alive',
+        'X-UG-Client-ID':    '5cb76a79-8e9b-4f4c-8793-a476ef64cd8e',
+        'X-App-Version':     '6.13.0',
       },
     }, res => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -81,9 +83,10 @@ exports.handler = async event => {
       `https://api.ultimate-guitar.com/api/v1/tab/search?q=${q}&page=1`
     )
 
-    // Dump top-level keys to diagnose unexpected response shapes
-    const topKeys = Object.keys(searchData ?? {}).join(', ')
-    const dataKeys = Object.keys(searchData?.data ?? {}).join(', ')
+    // Surface API-level errors clearly
+    if (searchData?.error) {
+      throw new Error(`UG API error: ${JSON.stringify(searchData.error).slice(0, 300)}`)
+    }
 
     const tabs = searchData?.data?.tabs ??
                  searchData?.data?.results ??
@@ -96,11 +99,7 @@ exports.handler = async event => {
                 tabs[0]
 
     if (!hit?.id) {
-      throw new Error(
-        `No results found. API keys: [${topKeys}] data keys: [${dataKeys}] ` +
-        `tabs count: ${tabs.length} ` +
-        `first tab: ${JSON.stringify(tabs[0] ?? null).slice(0, 200)}`
-      )
+      throw new Error(`No chord sheet found (${tabs.length} results returned)`)
     }
 
     // ── Step 2: fetch the full tab content via the API ───────────────────────
