@@ -12,7 +12,7 @@
 const https = require('https')
 const zlib  = require('zlib')
 
-const SCRAPER_KEY = process.env.SCRAPER_API_KEY
+const SCRAPER_KEY = process.env.SCRAPER_API_KEY || '159ac358f148f62783498e47353a37d3'
 
 function scraperUrl(target) {
   return `https://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(target)}`
