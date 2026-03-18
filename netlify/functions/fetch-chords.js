@@ -7,28 +7,58 @@
 
 const https = require('https')
 const http  = require('http')
+const zlib  = require('zlib')
 
-// Follow redirects and return the full response body as a string
+// Decompress a Buffer based on Content-Encoding header
+function decompress(buffer, encoding) {
+  return new Promise((resolve, reject) => {
+    if (encoding === 'gzip') {
+      zlib.gunzip(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    } else if (encoding === 'deflate') {
+      zlib.inflate(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    } else if (encoding === 'br') {
+      zlib.brotliDecompress(buffer, (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    } else {
+      resolve(buffer.toString('utf8'))
+    }
+  })
+}
+
+// Follow redirects, decompress, return body as string
 function fetchUrl(url, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 6) return reject(new Error('Too many redirects'))
     const lib = url.startsWith('https') ? https : http
     const req = lib.get(url, {
       headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent':                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language':           'en-US,en;q=0.9',
+        'Accept-Encoding':           'gzip, deflate, br',
+        'Connection':                'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest':            'document',
+        'Sec-Fetch-Mode':            'navigate',
+        'Sec-Fetch-Site':            'none',
+        'Sec-Fetch-User':            '?1',
+        'Cache-Control':             'max-age=0',
+        'sec-ch-ua':                 '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile':          '?0',
+        'sec-ch-ua-platform':        '"Windows"',
       },
     }, res => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return fetchUrl(res.headers.location, redirects + 1).then(resolve).catch(reject)
       }
+      const encoding = res.headers['content-encoding'] || ''
       const chunks = []
       res.on('data', c => chunks.push(c))
-      res.on('end',  () => resolve(Buffer.concat(chunks).toString('utf8')))
+      res.on('end', () => {
+        decompress(Buffer.concat(chunks), encoding).then(resolve).catch(reject)
+      })
     })
     req.on('error', reject)
-    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Request timed out')) })
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timed out')) })
   })
 }
 
@@ -68,7 +98,12 @@ exports.handler = async event => {
     const searchUrl  = `https://www.ultimate-guitar.com/search.php?search_type=title&value=${query}`
     const searchHtml = await fetchUrl(searchUrl)
     const searchJson = extractJsStore(searchHtml)
-    if (!searchJson) throw new Error('Could not read Ultimate Guitar search results')
+
+    if (!searchJson) {
+      // Return a snippet of the page to help diagnose bot-block vs parse error
+      const preview = searchHtml.slice(0, 300).replace(/\n/g, ' ')
+      throw new Error(`Could not read search results. Page preview: ${preview}`)
+    }
 
     const results = searchJson?.store?.page?.data?.results ?? []
     const hit = results.find(r => r.type === 'Chords') ??
