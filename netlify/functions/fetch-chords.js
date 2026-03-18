@@ -76,17 +76,32 @@ exports.handler = async event => {
   try {
     // ── Step 1: search via the UG mobile API (no Cloudflare) ────────────────
     const q = encodeURIComponent(`${title} ${artist}`)
+    // Try without type filter so we get all results back
     const searchData = await fetchJSON(
-      `https://api.ultimate-guitar.com/api/v1/tab/search?q=${q}&type[]=300&official=0&page=1`
+      `https://api.ultimate-guitar.com/api/v1/tab/search?q=${q}&page=1`
     )
 
-    const tabs = searchData?.data?.tabs ?? []
-    // Prefer "Chords" type; fall back to anything
+    // Dump top-level keys to diagnose unexpected response shapes
+    const topKeys = Object.keys(searchData ?? {}).join(', ')
+    const dataKeys = Object.keys(searchData?.data ?? {}).join(', ')
+
+    const tabs = searchData?.data?.tabs ??
+                 searchData?.data?.results ??
+                 searchData?.tabs ??
+                 searchData?.results ?? []
+
+    // Prefer "Chords" type; fall back to anything with content
     const hit = tabs.find(t => t.type_name === 'Chords') ??
                 tabs.find(t => ['Tab', 'Pro Tab'].includes(t.type_name)) ??
                 tabs[0]
 
-    if (!hit?.id) throw new Error('No chord sheet found for this song on Ultimate Guitar')
+    if (!hit?.id) {
+      throw new Error(
+        `No results found. API keys: [${topKeys}] data keys: [${dataKeys}] ` +
+        `tabs count: ${tabs.length} ` +
+        `first tab: ${JSON.stringify(tabs[0] ?? null).slice(0, 200)}`
+      )
+    }
 
     // ── Step 2: fetch the full tab content via the API ───────────────────────
     const tabData = await fetchJSON(
