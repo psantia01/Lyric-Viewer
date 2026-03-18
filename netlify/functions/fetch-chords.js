@@ -1,7 +1,10 @@
 /**
- * Netlify serverless function — fetches chord sheets from Ultimate Guitar
- * using their mobile JSON API (api.ultimate-guitar.com) which is not behind
- * the Cloudflare bot-protection that blocks requests to the main website.
+ * Netlify serverless function — fetches chord sheets from Ultimate Guitar.
+ *
+ * Uses ScraperAPI (scraperapi.com) to route requests through residential IPs
+ * that bypass Cloudflare's bot protection on www.ultimate-guitar.com.
+ *
+ * Requires env var: SCRAPER_API_KEY
  *
  * Usage: GET /.netlify/functions/fetch-chords?artist=X&title=Y
  */
@@ -9,47 +12,42 @@
 const https = require('https')
 const zlib  = require('zlib')
 
+const SCRAPER_KEY = process.env.SCRAPER_API_KEY
+
+function scraperUrl(target) {
+  return `https://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(target)}`
+}
+
 function decompress(buffer, encoding) {
   return new Promise((resolve, reject) => {
-    if (encoding === 'gzip')    zlib.gunzip(buffer,          (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
-    else if (encoding === 'deflate') zlib.inflate(buffer,    (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
-    else if (encoding === 'br') zlib.brotliDecompress(buffer,(e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    if (encoding === 'gzip')         zlib.gunzip(buffer,          (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    else if (encoding === 'deflate') zlib.inflate(buffer,         (e, b) => e ? reject(e) : resolve(b.toString('utf8')))
+    else if (encoding === 'br')      zlib.brotliDecompress(buffer,(e, b) => e ? reject(e) : resolve(b.toString('utf8')))
     else resolve(buffer.toString('utf8'))
   })
 }
 
-function fetchJSON(url, redirects = 0) {
+function fetchText(url, redirects = 0) {
   return new Promise((resolve, reject) => {
     if (redirects > 6) return reject(new Error('Too many redirects'))
     const req = https.get(url, {
       headers: {
-        // Mimic the official UG Android app
-        'User-Agent':        'UGT_ANDROID/6.13.0 (Linux; Android 13; Pixel 7)',
-        'Accept':            'application/json, text/plain, */*',
-        'Accept-Language':   'en-US,en;q=0.9',
-        'Accept-Encoding':   'gzip, deflate, br',
-        'Connection':        'keep-alive',
-        'X-UG-Client-ID':    '5cb76a79-8e9b-4f4c-8793-a476ef64cd8e',
-        'X-App-Version':     '6.13.0',
+        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
       },
     }, res => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetchJSON(res.headers.location, redirects + 1).then(resolve).catch(reject)
+        return fetchText(res.headers.location, redirects + 1).then(resolve).catch(reject)
       }
-      const encoding = res.headers['content-encoding'] || ''
+      const enc = res.headers['content-encoding'] || ''
       const chunks = []
       res.on('data', c => chunks.push(c))
-      res.on('end', () => {
-        decompress(Buffer.concat(chunks), encoding)
-          .then(text => {
-            try { resolve(JSON.parse(text)) }
-            catch { reject(new Error('Response was not valid JSON')) }
-          })
-          .catch(reject)
-      })
+      res.on('end', () => decompress(Buffer.concat(chunks), enc).then(resolve).catch(reject))
     })
     req.on('error', reject)
-    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timed out')) })
+    req.setTimeout(20000, () => { req.destroy(); reject(new Error('Request timed out')) })
   })
 }
 
@@ -58,6 +56,12 @@ function decodeHtmlEntities(str) {
     .replace(/&amp;/g,  '&').replace(/&lt;/g,  '<')
     .replace(/&gt;/g,   '>').replace(/&quot;/g, '"')
     .replace(/&#039;/g, "'").replace(/&#x27;/g, "'")
+}
+
+function extractJsStore(html) {
+  const m = html.match(/class="js-store"\s+data-content="([^"]+)"/)
+  if (!m) return null
+  try { return JSON.parse(decodeHtmlEntities(m[1])) } catch { return null }
 }
 
 exports.handler = async event => {
@@ -69,6 +73,11 @@ exports.handler = async event => {
 
   if (event.httpMethod === 'OPTIONS') return { statusCode: 200, headers: cors, body: '' }
 
+  if (!SCRAPER_KEY) {
+    return { statusCode: 500, headers: cors,
+      body: JSON.stringify({ error: 'SCRAPER_API_KEY environment variable is not set' }) }
+  }
+
   const { artist = '', title = '' } = event.queryStringParameters || {}
   if (!artist.trim() || !title.trim()) {
     return { statusCode: 400, headers: cors,
@@ -76,41 +85,29 @@ exports.handler = async event => {
   }
 
   try {
-    // ── Step 1: search via the UG mobile API (no Cloudflare) ────────────────
-    const q = encodeURIComponent(`${title} ${artist}`)
-    // Try without type filter so we get all results back
-    const searchData = await fetchJSON(
-      `https://api.ultimate-guitar.com/api/v1/tab/search?q=${q}&page=1`
-    )
+    // ── Step 1: search Ultimate Guitar via ScraperAPI ────────────────────────
+    const q         = encodeURIComponent(`${title} ${artist}`)
+    const searchUrl = `https://www.ultimate-guitar.com/search.php?search_type=title&value=${q}`
+    const searchHtml = await fetchText(scraperUrl(searchUrl))
+    const searchJson = extractJsStore(searchHtml)
 
-    // Surface API-level errors clearly
-    if (searchData?.error) {
-      throw new Error(`UG API error: ${JSON.stringify(searchData.error).slice(0, 300)}`)
+    if (!searchJson) {
+      const preview = searchHtml.slice(0, 200).replace(/\s+/g, ' ')
+      throw new Error(`Could not read search results. Preview: ${preview}`)
     }
 
-    const tabs = searchData?.data?.tabs ??
-                 searchData?.data?.results ??
-                 searchData?.tabs ??
-                 searchData?.results ?? []
+    const results = searchJson?.store?.page?.data?.results ?? []
+    const hit = results.find(r => r.type === 'Chords') ??
+                results.find(r => ['Tab', 'Pro Tab'].includes(r.type))
 
-    // Prefer "Chords" type; fall back to anything with content
-    const hit = tabs.find(t => t.type_name === 'Chords') ??
-                tabs.find(t => ['Tab', 'Pro Tab'].includes(t.type_name)) ??
-                tabs[0]
+    if (!hit?.tab_url) throw new Error('No chord sheet found for this song on Ultimate Guitar')
 
-    if (!hit?.id) {
-      throw new Error(`No chord sheet found (${tabs.length} results returned)`)
-    }
+    // ── Step 2: fetch the tab page via ScraperAPI ────────────────────────────
+    const tabHtml = await fetchText(scraperUrl(hit.tab_url))
+    const tabJson = extractJsStore(tabHtml)
+    if (!tabJson) throw new Error('Could not read the chord sheet page')
 
-    // ── Step 2: fetch the full tab content via the API ───────────────────────
-    const tabData = await fetchJSON(
-      `https://api.ultimate-guitar.com/api/v1/tab/info?tab_id=${hit.id}&tonality_name=&version=0`
-    )
-
-    const content =
-      tabData?.data?.tab_view?.wiki_tab?.content ??
-      tabData?.data?.tab?.content ?? ''
-
+    const content = tabJson?.store?.page?.data?.tab_view?.wiki_tab?.content ?? ''
     if (!content.trim()) throw new Error('Chord content was empty')
 
     // Convert UG [ch]X[/ch] / [tab] tags → our [X] inline format
@@ -125,10 +122,7 @@ exports.handler = async event => {
     return { statusCode: 200, headers: cors, body: JSON.stringify({ content: converted }) }
 
   } catch (err) {
-    return {
-      statusCode: 500,
-      headers: cors,
-      body: JSON.stringify({ error: err.message || 'Failed to fetch chords' }),
-    }
+    return { statusCode: 500, headers: cors,
+      body: JSON.stringify({ error: err.message || 'Failed to fetch chords' }) }
   }
 }
