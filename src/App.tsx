@@ -870,7 +870,52 @@ function App() {
             ) : (
               /* ── Saved page ── */
               <>
-                <h2 className="saved-page-title">Saved Songs</h2>
+                <div className="saved-page-header">
+                  <h2 className="saved-page-title">Saved Songs</h2>
+                  <div className="saved-page-actions">
+                    {/* Export */}
+                    {savedSongs.length > 0 && (
+                      <button className="io-btn" onClick={() => {
+                        const json = JSON.stringify(savedSongs, null, 2)
+                        const blob = new Blob([json], { type: 'application/json' })
+                        const url  = URL.createObjectURL(blob)
+                        const a    = document.createElement('a')
+                        a.href     = url
+                        a.download = 'lyric-viewer-songs.json'
+                        a.click()
+                        URL.revokeObjectURL(url)
+                      }}>⬇ Export</button>
+                    )}
+                    {/* Import */}
+                    <label className="io-btn">
+                      ⬆ Import
+                      <input type="file" accept=".json" style={{ display: 'none' }}
+                        onChange={e => {
+                          const file = e.target.files?.[0]
+                          if (!file) return
+                          const reader = new FileReader()
+                          reader.onload = ev => {
+                            try {
+                              const imported: SavedSong[] = JSON.parse(ev.target?.result as string)
+                              if (!Array.isArray(imported)) throw new Error('Invalid format')
+                              // Merge: imported songs win on duplicate IDs
+                              const merged = [
+                                ...savedSongs.filter(s => !imported.find(i => i.id === s.id)),
+                                ...imported,
+                              ]
+                              persistSaved(merged)
+                              alert(`Imported ${imported.length} song(s) successfully!`)
+                            } catch {
+                              alert('Could not read the file. Make sure it\'s a Lyric Viewer export.')
+                            }
+                          }
+                          reader.readAsText(file)
+                          e.target.value = '' // reset so same file can be re-imported
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
                 {savedSongs.length === 0 ? (
                   <div className="placeholder">
                     <span className="placeholder-icon">♫</span>
