@@ -81,8 +81,9 @@ exports.handler = async event => {
   }
 
   if (!SCRAPER_KEY) {
+    const availableKeys = Object.keys(process.env).join(', ')
     return { statusCode: 500, headers: cors,
-      body: JSON.stringify({ error: 'SCRAPER_API_KEY environment variable is not set' }) }
+      body: JSON.stringify({ error: `SCRAPER_API_KEY not set. Available env vars: ${availableKeys}` }) }
   }
 
   try {
