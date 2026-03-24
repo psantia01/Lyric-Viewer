@@ -12,7 +12,7 @@
 const https = require('https')
 const zlib  = require('zlib')
 
-const SCRAPER_KEY = process.env.SCRAPER_API_KEY
+const SCRAPER_KEY = process.env.SCRAPER_API_KEY || process.env.Scraper_API_Key
 
 function scraperUrl(target) {
   return `https://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(target)}`
@@ -81,9 +81,8 @@ exports.handler = async event => {
   }
 
   if (!SCRAPER_KEY) {
-    const availableKeys = Object.keys(process.env).join(', ')
     return { statusCode: 500, headers: cors,
-      body: JSON.stringify({ error: `SCRAPER_API_KEY not set. Available env vars: ${availableKeys}` }) }
+      body: JSON.stringify({ error: 'SCRAPER_API_KEY environment variable is not set' }) }
   }
 
   try {
